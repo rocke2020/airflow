@@ -1,0 +1,56 @@
+[
+    {
+        "eventType": "START",
+        "eventTime": "{{ is_datetime() }}",
+        "run": {
+            "runId": "{{ is_uuid() }}"
+        },
+        "job": {
+            "namespace": "default",
+            "name": "openlineage_basic_dag",
+            "facets": {
+                "jobType": {
+                    "integration": "AIRFLOW",
+                    "jobType": "DAG",
+                    "processingType": "BATCH"
+                }
+            }
+        }
+    },
+    {
+        "eventType": "START",
+        "eventTime": "{{ is_datetime() }}",
+        "run": {
+            "runId": "{{ is_uuid() }}"
+        },
+        "job": {
+            "namespace": "default",
+            "name": "openlineage_basic_dag.do_nothing_task",
+            "facets": {
+                "jobType": {
+                    "integration": "AIRFLOW",
+                    "jobType": "TASK",
+                    "processingType": "BATCH"
+                }
+            }
+        }
+    },
+    {
+        "eventType": "COMPLETE",
+        "eventTime": "{{ is_datetime() }}",
+        "run": {
+            "runId": "{{ is_uuid() }}"
+        },
+        "job": {
+            "namespace": "default",
+            "name": "openlineage_basic_dag.do_nothing_task",
+            "facets": {
+                "jobType": {
+                    "integration": "AIRFLOW",
+                    "jobType": "TASK",
+                    "processingType": "BATCH"
+                }
+            }
+        }
+    }
+]
