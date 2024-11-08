@@ -17,13 +17,11 @@
 
 from __future__ import annotations
 
+import uuid
 from socket import socketpair
-from typing import TYPE_CHECKING
 
+from airflow.sdk.execution_time.comms import StartupDetails
 from airflow.sdk.execution_time.task_runner import CommsDecoder
-
-if TYPE_CHECKING:
-    from airflow.sdk.execution_time.comms import StartupDetails
 
 
 class TestCommsDecoder:
@@ -33,15 +31,20 @@ class TestCommsDecoder:
         r, w = socketpair()
 
         w.makefile("wb").write(
-            b'{"type":"StartupDetails", "ti": {"id": "a", "task_id": "b", "try_number": 1}, '
+            b'{"type":"StartupDetails", "ti": {'
+            b'"id": "4d828a62-a417-4936-a7a6-2b3fabacecab", "task_id": "a", "try_number": 1, "run":'
+            b'{"run_id": "b", "dag_id": "c"} }, '
             b'"file": "/dev/null", "requests_fd": 4'
             b"}\n"
         )
 
         decoder = CommsDecoder(input=r.makefile("r"))
 
-        msg: StartupDetails = decoder.get_message()
-        assert msg.ti.task_id == "b"
+        msg = decoder.get_message()
+        assert isinstance(msg, StartupDetails)
+        assert msg.ti.id == uuid.UUID("4d828a62-a417-4936-a7a6-2b3fabacecab")
+        assert msg.ti.task_id == "a"
+        assert msg.ti.run.dag_id == "c"
         assert msg.file == "/dev/null"
 
         # Since this was a StartupDetails message, the decoder should open the other socket

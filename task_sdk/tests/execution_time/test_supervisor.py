@@ -39,7 +39,6 @@ def subprocess_main():
     import logging
 
     logging.getLogger("airflow.foobar").error("An error message")
-    ...
 
 
 @pytest.fixture
@@ -86,5 +85,10 @@ class TestWatchedSubprocess:
                 "logger": "task",
                 "timestamp": "2024-11-07T12:34:56.078901Z",
             },
-            {"event": "An error message", "level": "error", "logger": "airflow.foobar", "timestamp": instant},
+            {
+                "event": "An error message",
+                "level": "error",
+                "logger": "airflow.foobar",
+                "timestamp": instant.replace(tzinfo=None),
+            },
         ]

@@ -48,31 +48,7 @@ from typing import Any, Union
 import msgspec
 
 from airflow.sdk.api.datamodels._generated import TaskInstanceState  # noqa: TCH001
-
-
-class ExecuteTaskActivity(msgspec.Struct):
-    """Information needed to start a task on a worker."""
-
-    ti: TaskInstance
-    token: str
-    path: str | None = None
-
-
-# Temporary: These will next two live in a generated client soon.
-class DagRun(msgspec.Struct):
-    dag_id: str
-    run_id: str
-    data_interval_end: str | None = None
-    data_interval_start: str | None = None
-
-
-class TaskInstance(msgspec.Struct):
-    id: str
-    task_id: str
-    try_number: int
-    map_index: int | None = None
-    is_eligible_to_retry: bool = False
-    run: DagRun | None = None
+from airflow.sdk.api.datamodels.ti import TaskInstance  # noqa: TCH001
 
 
 class StartupDetails(msgspec.Struct, omit_defaults=True, tag=True):

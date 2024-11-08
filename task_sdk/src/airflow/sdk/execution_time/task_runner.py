@@ -30,7 +30,6 @@ import structlog
 
 from airflow.sdk import BaseOperator
 from airflow.sdk.execution_time.comms import StartupDetails, TaskInstance, ToSupervisor, ToTask
-from airflow.sdk.log import configure_logging
 
 if TYPE_CHECKING:
     from structlog.typing import FilteringBoundLogger as Logger
@@ -175,11 +174,6 @@ def finalize(log: Logger): ...
 
 
 def main():
-    # Configure logs to be JSON, so that we can pass it to the parent process
-    # Don't cache this log though!
-
-    configure_logging(enable_pretty_log=False)
-
     # TODO: add an exception here, it causes an oof of a stack trace!
 
     global SUPERVISOR_COMMS

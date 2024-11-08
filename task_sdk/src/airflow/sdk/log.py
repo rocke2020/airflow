@@ -161,7 +161,12 @@ def logging_processors(
             indent_guides=False,
             suppress=[asyncio, httpcore, httpx, contextlib, click, typer],
         )
-        console = structlog.dev.ConsoleRenderer(exception_formatter=rich_exc_formatter)
+        my_styles = structlog.dev.ConsoleRenderer.get_default_level_styles()
+        my_styles["debug"] = structlog.dev.CYAN
+
+        console = structlog.dev.ConsoleRenderer(
+            exception_formatter=rich_exc_formatter, level_styles=my_styles
+        )
         processors.append(console)
         return processors, {
             "timestamper": timestamper,

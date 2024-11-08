@@ -24,6 +24,7 @@ requires-python = ">=3.9, <3.13"
 dependencies = [
     "attrs>=24.2.0",
     "google-re2>=1.1.20240702",
+    "httpx>=0.27.0",
     "methodtools>=0.4.7",
     "msgspec>=0.18.6",
     "psutil>=6.1.0",
@@ -47,10 +48,17 @@ namespace-packages = ["src/airflow"]
 # Ignore Doc rules et al for anything outside of tests
 "!src/*" = ["D", "TID253", "S101", "TRY002"]
 
+# Only have pytest rules in tests - https://github.com/astral-sh/ruff/issues/14205
+"!tests/*" = ["PT"]
 
 "src/airflow/sdk/__init__.py" = ["TCH004"]
-# This is not part of the public API, so disable some of the doc requirements
-"src/airflow/sdk/execution_time/*" = ["D101"]
+
+# msgspec needs types for annotations to be defined, even with future
+# annotations, so disable the "type check only import" for these files
+"src/airflow/sdk/api/datamodels/*.py" = ["TCH001"]
+
+# Only the public API should _require_ docstrings on classes
+"!src/airflow/sdk/definitions/*" = ["D101"]
 
 # Generated file, be less strict
 "src/airflow/sdk/*/_generated.py" = ["D"]

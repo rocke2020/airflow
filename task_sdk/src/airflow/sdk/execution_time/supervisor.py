@@ -30,21 +30,26 @@ import time
 import weakref
 from collections.abc import Generator
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timezone
 from socket import socket, socketpair
-from typing import TYPE_CHECKING, Any, BinaryIO, Callable, ClassVar, Literal, NoReturn, cast, overload
+from typing import TYPE_CHECKING, BinaryIO, Callable, ClassVar, Literal, NoReturn, cast, overload
+from uuid import UUID
 
 import attrs
+import httpx
 import msgspec
 import psutil
 import structlog
 
+from airflow.sdk.api.client import Client
+from airflow.sdk.api.datamodels._generated import TaskInstanceState
 from airflow.sdk.execution_time.comms import StartupDetails, ToSupervisor
 
 if TYPE_CHECKING:
     from structlog.typing import FilteringBoundLogger
 
-    from airflow.sdk.execution_time.comms import ExecuteTaskActivity
+    from airflow.sdk.api.datamodels.activities import ExecuteTaskActivity
+    from airflow.sdk.api.datamodels.ti import TaskInstance
 
 
 __all__ = ["WatchedSubprocess"]
@@ -98,6 +103,8 @@ def _fork_main(
     log_fd: int,
     target: Callable[[], None],
 ) -> NoReturn:
+    # TODO: Make this process a session leader
+
     # Uninstall the rich etc. exception handler
     sys.excepthook = sys.__excepthook__
     signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -186,15 +193,20 @@ def _fork_main(
 
 @attrs.define()
 class WatchedSubprocess:
+    ti_id: UUID
     pid: int
 
     stdin: BinaryIO
     stdout: socket
     stderr: socket
 
+    client: Client
+
     _process: psutil.Process
     _exit_code: int | None = None
     _terminal_state: str | None = None
+
+    _last_heartbeat: float = 0
 
     selector: selectors.BaseSelector = attrs.field(factory=selectors.DefaultSelector)
 
@@ -205,7 +217,11 @@ class WatchedSubprocess:
 
     @classmethod
     def start(
-        cls, path: str | os.PathLike[str], ti: Any, target: Callable[[], None] = _subprocess_main
+        cls,
+        path: str | os.PathLike[str],
+        ti: TaskInstance,
+        client: Client,
+        target: Callable[[], None] = _subprocess_main,
     ) -> WatchedSubprocess:
         """Fork and start a new subprocess to execute the given task."""
         # Create socketpairs/"pipes" to connect to the stdin and out from the subprocess
@@ -225,12 +241,25 @@ class WatchedSubprocess:
             _fork_main(child_stdin, child_stdout, child_stderr, child_logs.fileno(), target)
 
         proc = cls(
+            ti_id=ti.id,
             pid=pid,
             stdin=feed_stdin,
             stdout=read_stdout,
             stderr=read_stderr,
             process=psutil.Process(pid),
+            client=client,
         )
+
+        # We've forked, but the task won't start until we send it the StartupDetails message. But before we do
+        # that, we need to tell the server it's started (so it has the chance to tell us "no, stop!" for any
+        # reason)
+        try:
+            client.task_instances.start(ti.id, pid, datetime.now(tz=timezone.utc))
+            proc._last_heartbeat = time.monotonic()
+        except Exception:
+            # On any error kill that subprocess!
+            proc.kill(signal.SIGKILL)
+            raise
 
         # TODO: Use logging providers to handle the chunked upload for us
         task_logger: FilteringBoundLogger = structlog.get_logger(logger_name="task").bind()
@@ -270,7 +299,6 @@ class WatchedSubprocess:
         log.debug("Sending", msg=msg)
         feed_stdin.write(msgspec.json.encode(msg))
         feed_stdin.write(b"\n")
-        # feed_stdin.flush()
 
         return proc
 
@@ -285,24 +313,56 @@ class WatchedSubprocess:
         if self._exit_code is not None:
             return self._exit_code
 
+        # TODO: Pull this from config
+        heartbeat_rate = 30
+
+        # Until we have a selector for the process, don't poll for more than 10s, just in case it exists but
+        # doesn't produce any output
+        max_poll_interval = 10
+
         try:
             while self._exit_code is None or len(self.selector.get_map()):
-                events = self.selector.select(timeout=10.0)
+                # Monitor the task to see if it's done. Wait in a syscall (`select`) for as long as possible
+                # so we notice the subprocess finishing as quick as we can.
+                max_wait_time = max(
+                    0,  # Make sure this value is never negative,
+                    min(
+                        # Ensure we heartbeat _at most_ 75% through the time the zombie threshold time
+                        heartbeat_rate - (time.monotonic() - self._last_heartbeat) * 0.75,
+                        max_poll_interval,
+                    ),
+                )
+                events = self.selector.select(timeout=max_wait_time)
                 for key, _ in events:
                     callback = key.data
-                    open = callback(key.fileobj)
+                    need_more = callback(key.fileobj)
 
-                    if not open:
-                        log.debug("Remote end closed, closing", fileobj=key.fileobj)
+                    if not need_more:
                         self.selector.unregister(key.fileobj)
                         key.fileobj.close()  # type: ignore[union-attr]
-                # TODO: Send heartbeat here
+
+                if self._exit_code is None:
+                    try:
+                        self._exit_code = self._process.wait(timeout=0)
+                        log.debug("Task process exited", exit_code=self._exit_code)
+                    except psutil.TimeoutExpired:
+                        pass
+
                 try:
-                    self._exit_code = self._process.wait(timeout=0.1)
-                except psutil.TimeoutExpired:
+                    # TODO: Currently this will heartbeat _every_ time we read any log message. That is way
+                    # too frequent!
+                    self.client.task_instances.heartbeat(self.ti_id)
+                    self._last_heartbeat = time.monotonic()
+                except Exception:
+                    log.warning("Couldn't heartbeat", exc_info=True)
+                    # TODO: If we couldn't heartbeat for X times the interval, kill ourselves
                     pass
         finally:
             self.selector.close()
+
+        self.client.task_instances.finish(
+            id=self.ti_id, state=self.final_state, when=datetime.now(tz=timezone.utc)
+        )
         return self._exit_code
 
     @property
@@ -316,10 +376,9 @@ class WatchedSubprocess:
 
         Not valid before the process has finished.
         """
-        # TODO: state enums
         if self._exit_code == 0:
-            return self._terminal_state if self._terminal_state is not None else "success"
-        return "failed"
+            return self._terminal_state or TaskInstanceState.SUCCESS
+        return TaskInstanceState.FAILED
 
     def __rich_repr__(self):
         yield "pid", self.pid
@@ -424,10 +483,14 @@ def process_log_messages_from_subprocess(log: FilteringBoundLogger) -> Generator
             continue
 
         if ts := event.get("timestamp"):
-            # We use msgspec to decode the json as it does it orders of magnitude quicker than
-            # datetime.strptime does
-            # TODO: don't hard-code the time format here
-            event["timestamp"] = msgspec.json.decode(f'"{ts}"', type=datetime)
+            # We use msgspec to decode the timestamp as it does it orders of magnitude quicker than
+            # datetime.strptime cn
+            #
+            # We remove the timezone info here, as the json encoding has `+00:00`, and since the log came
+            # from a subprocess we know that the timezone of the log message is the same, so having some
+            # messages include tz (from subprocess) but others not (ones from supervisor process) is
+            # confusing.
+            event["timestamp"] = msgspec.json.decode(f'"{ts}"', type=datetime).replace(tzinfo=None)
 
         if exc := event.pop("exception", None):
             # TODO: convert the dict back to a pretty stack trace
@@ -464,11 +527,14 @@ def supervise(activity: ExecuteTaskActivity, server: str | None = None, dry_run:
     if not activity.path:
         raise ValueError("path filed of activity missing")
 
+    limits = httpx.Limits(max_keepalive_connections=1, max_connections=10)
+    client = Client(base_url=server or "", limits=limits, dry_run=dry_run, token=activity.token)
+
     start = time.monotonic()
 
-    process = WatchedSubprocess.start(activity.path, activity.ti)
+    process = WatchedSubprocess.start(activity.path, activity.ti, client=client)
 
     exit_code = process.wait()
     end = time.monotonic()
-    log.debug("Process exited", exit_code=exit_code, duration=end - start)
+    log.debug("Task finished", exit_code=exit_code, duration=end - start)
     return exit_code
